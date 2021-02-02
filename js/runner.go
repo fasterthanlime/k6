@@ -27,11 +27,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/cookiejar"
+	"os"
 	"runtime/debug"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/dop251/goja"
@@ -65,8 +68,9 @@ type Runner struct {
 	ActualResolver netext.MultiResolver
 	RPSLimit       *rate.Limiter
 
-	console   *console
-	setupData []byte
+	console      *console
+	setupData    []byte
+	keyLogWriter *keyLogWriter
 }
 
 // New returns a new Runner for the provide source
@@ -97,6 +101,11 @@ func newFromBundle(logger *logrus.Logger, b *Bundle) (*Runner, error) {
 		return nil, err
 	}
 
+	keyLogWriter, err := newKeyLogWriter()
+	if err != nil {
+		return nil, err
+	}
+
 	defDNS := types.DefaultDNSConfig()
 	r := &Runner{
 		Bundle:       b,
@@ -107,7 +116,8 @@ func newFromBundle(logger *logrus.Logger, b *Bundle) (*Runner, error) {
 			KeepAlive: 30 * time.Second,
 			DualStack: true,
 		},
-		console: newConsole(logger),
+		console:      newConsole(logger),
+		keyLogWriter: keyLogWriter,
 		Resolver: netext.NewResolver(
 			net.LookupIP, 0, defDNS.Select.DNSSelect, defDNS.Policy.DNSPolicy),
 		ActualResolver: net.LookupIP,
@@ -186,6 +196,7 @@ func (r *Runner) newVU(id int64, samplesOut chan<- stats.SampleContainer) (*VU, 
 		Certificates:       certs,
 		NameToCertificate:  nameToCert,
 		Renegotiation:      tls.RenegotiateFreelyAsClient,
+		KeyLogWriter:       r.keyLogWriter,
 	}
 	transport := &http.Transport{
 		Proxy:               http.ProxyFromEnvironment,
@@ -724,4 +735,37 @@ func (u *VU) runFn(
 	u.state.Samples <- u.Dialer.GetTrail(startTime, endTime, isFullIteration, isDefault, stats.NewSampleTags(u.state.Tags))
 
 	return v, isFullIteration, endTime.Sub(startTime), err
+}
+
+// Synchronized writer for SSLKEYLOGFILE
+type keyLogWriter struct {
+	file *os.File
+	lock sync.Mutex
+}
+
+func newKeyLogWriter() (*keyLogWriter, error) {
+	keypath := os.Getenv("SSLKEYLOGFILE")
+	if keypath == "" {
+		return nil, nil
+	}
+
+	log.Printf("[SECURITY WARNING] Writing SSL secrets to %s", keypath)
+
+	// Even though access to this writer is synchronized across VUs
+	// of a same runner, we pass O_APPEND for safety.
+	file, err := os.OpenFile(keypath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return nil, err
+	}
+
+	return &keyLogWriter{
+		file: file,
+	}, nil
+}
+
+func (klw *keyLogWriter) Write(p []byte) (int, error) {
+	klw.lock.Lock()
+	defer klw.lock.Unlock()
+
+	return klw.file.Write(p)
 }
