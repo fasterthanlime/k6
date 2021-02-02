@@ -196,8 +196,11 @@ func (r *Runner) newVU(id int64, samplesOut chan<- stats.SampleContainer) (*VU, 
 		Certificates:       certs,
 		NameToCertificate:  nameToCert,
 		Renegotiation:      tls.RenegotiateFreelyAsClient,
-		KeyLogWriter:       r.keyLogWriter,
 	}
+	if r.keyLogWriter != nil {
+		tlsConfig.KeyLogWriter = r.keyLogWriter
+	}
+
 	transport := &http.Transport{
 		Proxy:               http.ProxyFromEnvironment,
 		TLSClientConfig:     tlsConfig,
